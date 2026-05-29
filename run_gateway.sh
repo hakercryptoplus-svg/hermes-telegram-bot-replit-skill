@@ -3,7 +3,18 @@ export HERMES_HOME="$HOME/.hermes"
 export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
 
-# Find hermes binary — works in both dev and production
+# ── SIGNAL HANDLING ────────────────────────────────────────────────────────────
+# When Replit workflow sends SIGTERM, exit cleanly (don't loop forever)
+HERMES_PID=""
+cleanup_and_exit() {
+    echo "[wrapper] SIGTERM received — shutting down cleanly..."
+    [ -n "$HERMES_PID" ] && kill "$HERMES_PID" 2>/dev/null
+    wait "$HERMES_PID" 2>/dev/null
+    exit 0
+}
+trap cleanup_and_exit SIGTERM SIGHUP INT
+
+# ── FIND HERMES BINARY ─────────────────────────────────────────────────────────
 if command -v hermes &>/dev/null; then
     HERMES_BIN="$(command -v hermes)"
 elif [ -f "/home/runner/workspace/.pythonlibs/bin/hermes" ]; then
@@ -13,12 +24,12 @@ elif [ -f "$HOME/.local/bin/hermes" ]; then
 else
     HERMES_BIN="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/hermes"
 fi
-
 echo "[wrapper] Using hermes binary: $HERMES_BIN"
-"$HERMES_BIN" --version 2>&1 || { echo "[wrapper] ERROR: hermes not found at $HERMES_BIN"; exit 1; }
+"$HERMES_BIN" --version 2>&1 || { echo "[wrapper] ERROR: hermes not found"; exit 1; }
 
 PORT="${PORT:-8080}"
 
+# ── WRITE .env ─────────────────────────────────────────────────────────────────
 mkdir -p "$HERMES_HOME"
 cat > "$HERMES_HOME/.env" <<DOTENV
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
@@ -31,17 +42,15 @@ echo "[wrapper] Wrote ~/.hermes/.env"
 echo "[wrapper] TELEGRAM_BOT_TOKEN set: $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo YES || echo NO)"
 echo "[wrapper] PORTKEY_API_KEY set: $([ -n "$PORTKEY_API_KEY" ] && echo YES || echo NO)"
 
-# Install Portkey plugin fresh every startup
+# ── INSTALL PORTKEY PLUGIN ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$HERMES_HOME/plugins/model-providers/portkey"
 cp "$SCRIPT_DIR/portkey_plugin/__init__.py" "$HERMES_HOME/plugins/model-providers/portkey/__init__.py"
 cp "$SCRIPT_DIR/portkey_plugin/plugin.yaml" "$HERMES_HOME/plugins/model-providers/portkey/plugin.yaml"
-echo "[wrapper] Installed Portkey plugin"
-
 cp "$SCRIPT_DIR/hermes_config.yaml" "$HERMES_HOME/config.yaml"
-echo "[wrapper] Copied hermes_config.yaml"
+echo "[wrapper] Installed plugin + copied config"
 
-# Start HTTP health check server (only once — skips silently if port already bound)
+# ── HEALTH CHECK SERVER ────────────────────────────────────────────────────────
 python3 -c "
 import http.server, os, socket, sys
 port = int(os.environ.get('PORT', 8080))
@@ -57,39 +66,46 @@ try:
             self.end_headers()
             self.wfile.write(b'Hermes Gateway Running\n')
         def log_message(self, *a): pass
-    print('[health] HTTP health check server listening on port', port, flush=True)
+    print('[health] Listening on port', port, flush=True)
     http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 except OSError:
-    print('[health] Port', port, 'already bound — skipping', flush=True)
+    print('[health] Port', port, 'already bound — OK', flush=True)
     sys.exit(0)
 " &
-HEALTH_PID=$!
 
-# ── INITIAL CLEANUP (runs once at startup) ───────────────────────────────────
+# ── INITIAL CLEANUP ────────────────────────────────────────────────────────────
 echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 3
 "$HERMES_BIN" gateway stop 2>/dev/null || true
 
-echo "[wrapper] Resetting Telegram polling state (3x)..."
+echo "[wrapper] Resetting Telegram polling state..."
 for i in 1 2 3; do
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     echo "[wrapper] Reset $i done"
     sleep 5
 done
 
-echo "[wrapper] Waiting 30s for Telegram session to fully clear..."
+echo "[wrapper] Waiting 30s for Telegram session to clear..."
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
 sleep 30
 echo "[wrapper] Starting gateway..."
 
-# ── RESTART LOOP ─────────────────────────────────────────────────────────────
+# ── RESTART LOOP ───────────────────────────────────────────────────────────────
 while true; do
-    "$HERMES_BIN" gateway run
-    EXIT_CODE=$?
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Resetting before restart..."
+    # Run hermes in background so our trap can catch SIGTERM
+    "$HERMES_BIN" gateway run &
+    HERMES_PID=$!
+    echo "[wrapper] Gateway PID: $HERMES_PID"
 
-    # Stop only the hermes gateway process — NOT pkill which would kill our own loop
+    # Wait for hermes to exit (returns when hermes exits OR when trap fires)
+    wait $HERMES_PID
+    EXIT_CODE=$?
+
+    # If trap fired (SIGTERM/INT), we already exited — this line won't be reached
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Restarting in 15s..."
+    HERMES_PID=""
+
     "$HERMES_BIN" gateway stop 2>/dev/null || true
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     sleep 15
