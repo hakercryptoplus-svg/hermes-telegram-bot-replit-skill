@@ -100,8 +100,9 @@ CONSECUTIVE_QUICK_EXITS=0
 while true; do
     START_TIME=$(date +%s)
 
-    # Run hermes in background so our trap can catch SIGTERM
-    "$HERMES_BIN" gateway run &
+    # Run hermes with a 60s timeout so it doesn't loop forever on polling conflict.
+    # (hermes v0.14.0 retries polling conflict internally and never self-exits)
+    timeout 60 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
