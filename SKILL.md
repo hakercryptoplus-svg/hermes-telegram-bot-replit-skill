@@ -25,9 +25,9 @@ A **real** Hermes Agent (Nous Research v0.14.0) connected to Telegram via `herme
 | `PORTKEY_BASE_URL` | `https://api.portkey.ai/v1` |
 | `PORTKEY_MODEL` | `gemini-3.5-flash` |
 | `TELEGRAM_CHAT_ID` | Your Telegram user ID (get from @userinfobot) |
-| `TELEGRAM_ALLOWED_USERS` | Same as TELEGRAM_CHAT_ID — numeric Telegram user ID |
+| `TELEGRAM_ALLOWED_USERS` | Same as TELEGRAM_CHAT_ID — numeric Telegram user ID (NOT username) |
 
-> **Critical**: `TELEGRAM_ALLOWED_USERS` must be set as a Replit env var AND written to `~/.hermes/.env` at runtime (handled automatically by `run_gateway.sh`). Hermes v0.14.0 requires this — `allow_from` in config alone is not sufficient.
+> **Critical**: `TELEGRAM_ALLOWED_USERS` must be a **numeric ID** (e.g. `7281928709`), NOT a username like `@myuser`. Set it as a Replit env var AND it gets written to `~/.hermes/.env` at runtime (handled automatically by `run_gateway.sh`).
 
 ## Project Structure
 
@@ -57,12 +57,23 @@ artifacts/
 export HERMES_HOME="$HOME/.hermes"
 export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
-# PORTKEY_API_KEY and TELEGRAM_BOT_TOKEN come from Replit secrets automatically
 
-HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
+# Find hermes binary — works in both dev and production
+if command -v hermes &>/dev/null; then
+    HERMES_BIN="$(command -v hermes)"
+elif [ -f "/home/runner/workspace/.pythonlibs/bin/hermes" ]; then
+    HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
+elif [ -f "$HOME/.local/bin/hermes" ]; then
+    HERMES_BIN="$HOME/.local/bin/hermes"
+else
+    HERMES_BIN="$(python3 -c 'import sysconfig; print(sysconfig.get_path(\"scripts\"))')/hermes"
+fi
+
+echo "[wrapper] Using hermes binary: $HERMES_BIN"
+"$HERMES_BIN" --version 2>&1 || { echo "[wrapper] ERROR: hermes not found at $HERMES_BIN"; exit 1; }
+
 PORT="${PORT:-8080}"
 
-# Write ~/.hermes/.env so Hermes picks up allowed users and gateway settings
 mkdir -p "$HERMES_HOME"
 cat > "$HERMES_HOME/.env" <<DOTENV
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
@@ -73,8 +84,17 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 DOTENV
 echo "[wrapper] Wrote ~/.hermes/.env"
 
-# Start minimal HTTP health check server in background
-# Required: Replit deploy probe needs HTTP 200 to confirm app started
+# Install Portkey plugin fresh every startup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$HERMES_HOME/plugins/model-providers/portkey"
+cp "$SCRIPT_DIR/portkey_plugin/__init__.py" "$HERMES_HOME/plugins/model-providers/portkey/__init__.py"
+cp "$SCRIPT_DIR/portkey_plugin/plugin.yaml" "$HERMES_HOME/plugins/model-providers/portkey/plugin.yaml"
+echo "[wrapper] Installed Portkey plugin"
+
+cp "$SCRIPT_DIR/hermes_config.yaml" "$HERMES_HOME/config.yaml"
+echo "[wrapper] Copied hermes_config.yaml"
+
+# Start HTTP health check server (Replit deploy probe requires HTTP 200)
 python3 -c "
 import http.server, os
 class H(http.server.BaseHTTPRequestHandler):
@@ -89,46 +109,39 @@ print('[health] HTTP health check server listening on port', port, flush=True)
 http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 " &
 
-# Reset Telegram polling state — clears stale getUpdates sessions from old instances
-echo "[wrapper] Resetting Telegram polling state..."
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" && echo ""
-sleep 2
+# Aggressively reset Telegram polling (3x with delay to kill old sessions)
+echo "[wrapper] Aggressively resetting Telegram polling state..."
+for i in 1 2 3; do
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+    echo "[wrapper] Reset attempt $i done"
+    sleep 5
+done
 
-# Kill ALL stale hermes processes aggressively
-echo "[wrapper] Clearing stale hermes processes..."
-pkill -f "hermes gateway" 2>/dev/null || true
-sleep 2
-"$HERMES_BIN" gateway stop 2>/dev/null || true
+# Kill all stale hermes processes
+pkill -9 -f "hermes" 2>/dev/null || true
 sleep 3
+"$HERMES_BIN" gateway stop 2>/dev/null || true
 
-echo "[wrapper] Starting Hermes Gateway loop..."
+# Final reset + wait 30s for Telegram server-side session to fully expire
+echo "[wrapper] Final Telegram reset — waiting 30s for session to clear..."
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+sleep 30
+echo "[wrapper] Starting gateway..."
 
 while true; do
     "$HERMES_BIN" gateway run
     EXIT_CODE=$?
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Cleaning up before restart..."
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Restarting..."
     pkill -f "hermes gateway" 2>/dev/null || true
     "$HERMES_BIN" gateway stop 2>/dev/null || true
-    # Reset Telegram state before each restart to prevent polling conflicts
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    sleep 10
-    echo "[wrapper] Restarting gateway..."
+    sleep 15
 done
 ```
 
-**Why `deleteWebhook` before starting?**
-Telegram's long-polling (`getUpdates`) has a server-side session. If a previous instance is killed without Telegram releasing the session, the next instance gets `Conflict: terminated by other getUpdates request`. Calling `deleteWebhook?drop_pending_updates=true` before each start resets this state immediately — no need to wait for Telegram's session timeout.
-
-**Why the health check server?**
-Replit's deploy probe sends `GET /` and requires HTTP 200 before marking the app as started. Hermes gateway does not serve HTTP, so without this Python server the deployment always fails with "app built successfully but failed to start".
-
-**Why aggressive cleanup + 10s delay between restarts?**
-Hermes exits code 1 on SIGTERM. The `pkill` + `hermes gateway stop` + `sleep 10` gives Telegram time to clear the session before the next attempt.
-
-**Why write `~/.hermes/.env`?**
-Hermes v0.14.0 reads `TELEGRAM_ALLOWED_USERS` from `$HERMES_HOME/.env`. Setting it only as a system env var is not sufficient.
-
 ### `artifacts/api-server/hermes_config.yaml`
+
+> ⚠️ Do NOT add a `providers:` block pointing to `http://127.0.0.1:8765` — that local proxy doesn't exist and causes `telegram connect timed out`. The Portkey plugin handles provider registration directly.
 
 ```yaml
 model:
@@ -138,7 +151,7 @@ model:
 telegram:
   free_response_chats: true
   allow_from:
-    - 7281928709      # Replace with your Telegram user ID
+    - 7281928709      # Replace with your numeric Telegram user ID
   admin_from:
     - 7281928709
 
@@ -147,8 +160,6 @@ gateway:
     mode: idle
     idle_minutes: 60
 ```
-
-> Note: `allow_from` in config alone is NOT enough in Hermes v0.14.0. You must also set `TELEGRAM_ALLOWED_USERS` in `~/.hermes/.env` (done automatically by `run_gateway.sh`).
 
 ### `artifacts/api-server/portkey_plugin/__init__.py`
 
@@ -224,8 +235,6 @@ args = ["bash", "artifacts/api-server/run_gateway.sh"]
 path = "/api"
 ```
 
-> **Critical**: Do NOT use `--user` in the pip install command. It fails with `ERROR: Can not perform a '--user' install. User site-packages are not visible in this virtualenv.`
-
 ### `artifacts/bot-status/.replit-artifact/artifact.toml`
 
 ```toml
@@ -233,6 +242,7 @@ kind = "web"
 previewPath = "/"
 title = "Hermes Bot Status"
 version = "1.0.0"
+id = "artifacts/bot-status"
 
 [[services]]
 name = "web"
@@ -256,32 +266,17 @@ to = "/index.html"
 
 ### Step 1: Install Python 3.12
 
-Use the Replit package manager to install the `python-3.12` module.
+Use the Replit package manager (`installProgrammingLanguage({ language: "python-3.12" })`).
 
 ### Step 2: Install Hermes & dependencies
 
 ```bash
-pip install hermes-agent==0.14.0 python-telegram-bot==22.7 openai>=2.0.0 httpx>=0.28.0
+pip install hermes-agent==0.14.0 python-telegram-bot==22.7 "openai>=2.0.0" "httpx>=0.28.0"
 ```
 
 Verify: `hermes --version` (should show v0.14.0)
 
-### Step 3: Install Portkey Plugin
-
-```bash
-mkdir -p ~/.hermes/plugins/model-providers/portkey
-cp artifacts/api-server/portkey_plugin/__init__.py ~/.hermes/plugins/model-providers/portkey/__init__.py
-cp artifacts/api-server/portkey_plugin/plugin.yaml ~/.hermes/plugins/model-providers/portkey/plugin.yaml
-```
-
-### Step 4: Configure Hermes
-
-```bash
-cp artifacts/api-server/hermes_config.yaml ~/.hermes/config.yaml
-# Edit allow_from: [your_telegram_user_id]
-```
-
-### Step 5: Set Required Env Vars
+### Step 3: Set Required Env Vars
 
 In Replit Secrets: `PORTKEY_API_KEY`, `TELEGRAM_BOT_TOKEN`, `SESSION_SECRET`
 
@@ -289,54 +284,40 @@ In Replit Shared Env:
 - `PORTKEY_CONFIG=pc-gemini-85dd0b`
 - `PORTKEY_BASE_URL=https://api.portkey.ai/v1`
 - `PORTKEY_MODEL=gemini-3.5-flash`
-- `TELEGRAM_CHAT_ID=<your_telegram_user_id>`
-- `TELEGRAM_ALLOWED_USERS=<your_telegram_user_id>` ← **required, same value as TELEGRAM_CHAT_ID**
+- `TELEGRAM_CHAT_ID=<numeric_telegram_user_id>`
+- `TELEGRAM_ALLOWED_USERS=<same_numeric_id>` ← **must be numeric, NOT a username**
 
-### Step 6: Deploy (Replit Publish)
+### Step 4: Deploy (Replit Publish)
 
-⚠️ **CRITICAL**: Must select **Reserved VM** (not Autoscale) because:
-- Autoscale sleeps when idle — bot stops responding
-- Bot uses long-polling (persistent connection to Telegram)
-
-Steps:
-1. Click **Publish** in Replit
-2. In Publishing settings → select **Reserved VM**
-3. Click Deploy
+⚠️ **CRITICAL**: Must select **Reserved VM** (not Autoscale).
 
 ## Gotchas & Sharp Edges
 
 ### 1. `pip install --user` fails in production build
-**Cause**: Replit's build environment has a virtualenv active where `--user` installs are blocked.
-**Fix**: Use `python3 -m pip install --break-system-packages -r requirements.txt` (no `--user` flag).
+**Fix**: Use `python3 -m pip install --break-system-packages` (no `--user` flag).
 
 ### 2. "App built successfully but failed to start"
-**Cause**: Hermes gateway does not serve HTTP. Replit's deploy probe expects HTTP 200 on startup.
-**Fix**: `run_gateway.sh` starts a Python `http.server` in the background on `$PORT` before launching the gateway.
+**Fix**: `run_gateway.sh` starts a Python `http.server` in background on `$PORT` before launching gateway.
 
 ### 3. `Conflict: terminated by other getUpdates request`
-**Cause**: Telegram's long-polling has a server-side session. When an instance restarts, the old session isn't immediately released, causing conflicts.
-**Fix**: Call `curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"` before each gateway start. This resets Telegram's session state immediately.
+**Cause**: Old deployment instance still holds Telegram polling session.
+**Fix**: `run_gateway.sh` calls `deleteWebhook?drop_pending_updates=true` 3× with delays, then waits 30s before starting. This outlasts Telegram's ~25s session timeout.
 
-### 4. "Unauthorized user" even with correct ID in hermes_config.yaml
-**Cause**: Hermes v0.14.0 requires `TELEGRAM_ALLOWED_USERS` in `~/.hermes/.env`, not only `allow_from` in config.
-**Fix**: `run_gateway.sh` writes `~/.hermes/.env` with `TELEGRAM_ALLOWED_USERS` on every startup. Also set `TELEGRAM_ALLOWED_USERS` as a Replit env var.
+### 4. "Unauthorized user" even with correct ID
+**Fix**: `TELEGRAM_ALLOWED_USERS` must be **numeric** (e.g. `7281928709`), NOT `@username`. Written to `~/.hermes/.env` on every startup.
 
-### 5. Hermes exits code 1 on SIGTERM
-**Cause**: Hermes expects systemd to restart it (exits 1 = "signal-initiated shutdown").
-**Fix**: The `run_gateway.sh` wrapper uses a `while true` restart loop.
+### 5. `telegram connect timed out` / no gateway connection
+**Cause**: `providers:` block in `hermes_config.yaml` pointing to `http://127.0.0.1:8765` — that local proxy doesn't exist.
+**Fix**: Remove the `providers:` block entirely. The Portkey plugin registers itself directly.
 
-### 6. "Nothing to publish" error in Replit UI
-**Cause**: Replit's publishing UI requires at least one `kind=web` artifact.
-**Fix**: Create a minimal react-vite artifact at `previewPath="/"` (the `bot-status` artifact handles this).
+### 6. Hermes exits code 1 on SIGTERM
+**Fix**: `run_gateway.sh` uses a `while true` restart loop.
 
-### 7. HERMES_HOME must be set
-Hermes reads config from `$HERMES_HOME`. Always set `export HERMES_HOME="$HOME/.hermes"` in the run script.
+### 7. `TELEGRAM_ALLOWED_USERS` must be numeric
+Always use the numeric Telegram user ID (get from @userinfobot on Telegram), never a username.
 
-### 8. Portkey config ID
-`PORTKEY_CONFIG` must point to a valid Portkey virtual key/config targeting Gemini. Create at https://app.portkey.ai/configs.
-
-### 9. Telegram allow_from
-The `allow_from` list in `hermes_config.yaml` must include your numeric Telegram user ID (get from @userinfobot on Telegram). Also set the same value as `TELEGRAM_ALLOWED_USERS` env var.
+### 8. HERMES_HOME must be set
+Always `export HERMES_HOME="$HOME/.hermes"` in the run script.
 
 ## How It Works (Architecture)
 
@@ -367,15 +348,12 @@ curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
 
 # Test gateway locally
 bash artifacts/api-server/run_gateway.sh
-
-# Check logs
-tail -f ~/.hermes/logs/gateway.log
 ```
 
 ## Monitoring in Production
 
 Look for these lines in Replit's deployment Logs tab:
 - `[health] HTTP health check server listening on port 8080` — app started
-- `[wrapper] Resetting Telegram polling state...` — clearing old sessions
-- `[wrapper] Starting Hermes Gateway loop...` — gateway starting
+- `[wrapper] Aggressively resetting Telegram polling state...` — clearing old sessions
+- `[wrapper] Starting gateway...` — about to launch
 - `✓ telegram connected` — bot is live and ready
