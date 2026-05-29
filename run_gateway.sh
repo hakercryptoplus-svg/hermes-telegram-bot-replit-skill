@@ -42,13 +42,41 @@ echo "[wrapper] Wrote ~/.hermes/.env"
 echo "[wrapper] TELEGRAM_BOT_TOKEN set: $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo YES || echo NO)"
 echo "[wrapper] PORTKEY_API_KEY set: $([ -n "$PORTKEY_API_KEY" ] && echo YES || echo NO)"
 
+# ── PRE-FLIGHT: verify bot token with Telegram API ────────────────────────────
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+    GETME=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe")
+    echo "[wrapper] getMe response: $GETME"
+else
+    echo "[wrapper] ERROR: TELEGRAM_BOT_TOKEN is empty — bot cannot start"
+    exit 1
+fi
+
 # ── INSTALL PORTKEY PLUGIN ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$HERMES_HOME/plugins/model-providers/portkey"
 cp "$SCRIPT_DIR/portkey_plugin/__init__.py" "$HERMES_HOME/plugins/model-providers/portkey/__init__.py"
 cp "$SCRIPT_DIR/portkey_plugin/plugin.yaml" "$HERMES_HOME/plugins/model-providers/portkey/plugin.yaml"
-cp "$SCRIPT_DIR/hermes_config.yaml" "$HERMES_HOME/config.yaml"
-echo "[wrapper] Installed plugin + copied config"
+
+# Write config dynamically so TELEGRAM_CHAT_ID env var is used (not hardcoded ID)
+TGID="${TELEGRAM_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-7281928709}}"
+cat > "$HERMES_HOME/config.yaml" <<CONFIG
+model:
+  provider: portkey
+  name: gemini-3.5-flash
+
+telegram:
+  free_response_chats: true
+  allow_from:
+    - ${TGID}
+  admin_from:
+    - ${TGID}
+
+gateway:
+  session_reset:
+    mode: idle
+    idle_minutes: 60
+CONFIG
+echo "[wrapper] Installed plugin + wrote config (telegram_id=${TGID})"
 
 # ── HEALTH CHECK SERVER ────────────────────────────────────────────────────────
 python3 -c "
@@ -100,9 +128,11 @@ CONSECUTIVE_QUICK_EXITS=0
 while true; do
     START_TIME=$(date +%s)
 
-    # Run hermes with a 60s timeout so it doesn't loop forever on polling conflict.
+    # Run hermes with a 600s timeout so it doesn't loop forever on polling conflict.
     # (hermes v0.14.0 retries polling conflict internally and never self-exits)
-    timeout 60 "$HERMES_BIN" gateway run &
+    # NOTE: 60s was too short — Telegram long-poll is 30s per cycle, so 60s killed
+    # hermes after exactly 1 cycle making it look like a conflict (code=124).
+    timeout 600 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
@@ -116,10 +146,12 @@ while true; do
 
     echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)."
 
-    # Exit code 124 = timeout killed hermes (never connected → polling conflict)
-    if [ $EXIT_CODE -eq 124 ]; then
+    # Conflict detection: code=124 (timeout) AND uptime < 120s means hermes
+    # never connected — another instance holds the Telegram polling session.
+    # (normal operation: hermes runs 600s per cycle, so uptime will be ~600s)
+    if [ $EXIT_CODE -eq 124 ] && [ "$UPTIME" -lt 120 ]; then
         CONSECUTIVE_QUICK_EXITS=$((CONSECUTIVE_QUICK_EXITS + 1))
-        echo "[wrapper] Timeout exit #${CONSECUTIVE_QUICK_EXITS} — another instance likely holds the Telegram session."
+        echo "[wrapper] Quick timeout exit #${CONSECUTIVE_QUICK_EXITS} (uptime=${UPTIME}s) — another instance likely holds the Telegram session."
         if [ "$CONSECUTIVE_QUICK_EXITS" -ge 3 ]; then
             echo "[wrapper] Production instance running. Backing off 5 minutes to let it stabilise..."
             CONSECUTIVE_QUICK_EXITS=0
