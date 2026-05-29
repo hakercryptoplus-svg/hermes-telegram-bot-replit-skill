@@ -41,11 +41,10 @@ echo "[wrapper] Installed Portkey plugin"
 cp "$SCRIPT_DIR/hermes_config.yaml" "$HERMES_HOME/config.yaml"
 echo "[wrapper] Copied hermes_config.yaml"
 
-# Start HTTP health check server (only if port not already in use)
+# Start HTTP health check server (only once — skips silently if port already bound)
 python3 -c "
 import http.server, os, socket, sys
 port = int(os.environ.get('PORT', 8080))
-# Check if already bound
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
@@ -61,36 +60,36 @@ try:
     print('[health] HTTP health check server listening on port', port, flush=True)
     http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 except OSError:
-    print('[health] Port', port, 'already in use — health server already running', flush=True)
+    print('[health] Port', port, 'already bound — skipping', flush=True)
     sys.exit(0)
 " &
+HEALTH_PID=$!
 
-# Aggressively reset Telegram polling — call deleteWebhook multiple times with delay
-echo "[wrapper] Aggressively resetting Telegram polling state..."
-for i in 1 2 3; do
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    echo "[wrapper] Reset attempt $i done"
-    sleep 5
-done
-
-# Kill ALL stale hermes processes
-echo "[wrapper] Clearing stale hermes processes..."
+# ── INITIAL CLEANUP (runs once at startup) ───────────────────────────────────
+echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 3
 "$HERMES_BIN" gateway stop 2>/dev/null || true
 
-# Final Telegram reset + wait for session to expire
-echo "[wrapper] Final Telegram reset — waiting 30s for session to clear..."
+echo "[wrapper] Resetting Telegram polling state (3x)..."
+for i in 1 2 3; do
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+    echo "[wrapper] Reset $i done"
+    sleep 5
+done
+
+echo "[wrapper] Waiting 30s for Telegram session to fully clear..."
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
 sleep 30
-echo "[wrapper] Done waiting. Starting gateway..."
+echo "[wrapper] Starting gateway..."
 
+# ── RESTART LOOP ─────────────────────────────────────────────────────────────
 while true; do
-    # --replace kills any lingering gateway before starting
-    "$HERMES_BIN" gateway run --replace
+    "$HERMES_BIN" gateway run
     EXIT_CODE=$?
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Cleaning up before restart..."
-    pkill -9 -f "hermes gateway" 2>/dev/null || true
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Resetting before restart..."
+
+    # Stop only the hermes gateway process — NOT pkill which would kill our own loop
     "$HERMES_BIN" gateway stop 2>/dev/null || true
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     sleep 15
