@@ -81,7 +81,7 @@ while true; do
 
     # timeout 60 forces exit if hermes loops forever on polling conflict
     # hermes v0.14.0 retries internally forever and never self-exits on conflict
-    timeout 60 "$HERMES_BIN" gateway run &
+    timeout 600 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     wait $HERMES_PID
     EXIT_CODE=$?
@@ -183,7 +183,7 @@ args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifac
 | 7 | SIGTERM loop — hermes exits code=143 on every restart | `trap cleanup_and_exit SIGTERM` + hermes in background with `&` |
 | 8 | `Address already in use` on health server | `SO_REUSEADDR` + `try/except OSError: sys.exit(0)` |
 | 9 | Bot shows "typing" but never responds | `deleteWebhook` in restart loop breaks production session — keep it ONLY in one-time startup |
-| 10 | Dev/prod fight — typing never resolves | `timeout 60` + backoff 5min after 3 code=124 exits — hermes v0.14.0 NEVER self-exits on polling conflict |
+| 10 | Dev/prod fight — typing never resolves | `timeout 600` + backoff 5min after 3 quick exits (uptime<120s) — hermes v0.14.0 NEVER self-exits on polling conflict. **Do NOT use timeout 60** — Telegram long-poll is 30s so hermes always exits at ~60s even when healthy. |
 | 11 | `TELEGRAM_ALLOWED_USERS` username rejected silently | Always set numeric Telegram user ID |
 | 12 | Reserved VM required | Autoscale puts bot to sleep; long-polling needs 24/7 uptime |
 
