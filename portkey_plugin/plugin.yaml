@@ -1,0 +1,4 @@
+name: portkey
+kind: model-provider
+version: "1.0.0"
+description: "Portkey AI Gateway — unified gateway for Gemini, OpenAI, and more"
