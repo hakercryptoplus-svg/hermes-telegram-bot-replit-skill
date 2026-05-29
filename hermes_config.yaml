@@ -1,0 +1,15 @@
+model:
+  provider: portkey
+  name: gemini-3.5-flash
+
+telegram:
+  free_response_chats: true
+  allow_from:
+    - 7281928709
+  admin_from:
+    - 7281928709
+
+gateway:
+  session_reset:
+    mode: idle
+    idle_minutes: 60
