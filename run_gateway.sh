@@ -9,13 +9,13 @@ PORT="${PORT:-8080}"
 
 # Write ~/.hermes/.env so Hermes picks up allowed users and gateway settings
 mkdir -p "$HERMES_HOME"
-cat > "$HERMES_HOME/.env" <<EOF
+cat > "$HERMES_HOME/.env" <<DOTENV
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
 TELEGRAM_ADMIN_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
 PORTKEY_API_KEY=${PORTKEY_API_KEY}
 PORTKEY_CONFIG=${PORTKEY_CONFIG:-pc-gemini-85dd0b}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-EOF
+DOTENV
 echo "[wrapper] Wrote ~/.hermes/.env"
 
 # Start minimal HTTP health check server in background
@@ -33,7 +33,12 @@ print('[health] HTTP health check server listening on port', port, flush=True)
 http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 " &
 
-# Kill ALL stale hermes processes aggressively before starting
+# Reset Telegram polling state — clears any stale getUpdates sessions from previous instances
+echo "[wrapper] Resetting Telegram polling state..."
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" && echo ""
+sleep 2
+
+# Kill ALL stale hermes processes aggressively
 echo "[wrapper] Clearing stale hermes processes..."
 pkill -f "hermes gateway" 2>/dev/null || true
 sleep 2
@@ -48,6 +53,8 @@ while true; do
     echo "[wrapper] Gateway exited (code=$EXIT_CODE). Cleaning up before restart..."
     pkill -f "hermes gateway" 2>/dev/null || true
     "$HERMES_BIN" gateway stop 2>/dev/null || true
+    # Reset Telegram state before each restart to prevent polling conflicts
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     sleep 10
     echo "[wrapper] Restarting gateway..."
 done
