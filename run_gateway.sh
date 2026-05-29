@@ -116,14 +116,15 @@ while true; do
 
     echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)."
 
-    if [ $EXIT_CODE -ne 0 ] && [ "$UPTIME" -lt 30 ]; then
+    # Exit code 124 = timeout killed hermes (never connected → polling conflict)
+    if [ $EXIT_CODE -eq 124 ]; then
         CONSECUTIVE_QUICK_EXITS=$((CONSECUTIVE_QUICK_EXITS + 1))
-        echo "[wrapper] Quick exit #${CONSECUTIVE_QUICK_EXITS} (likely polling conflict with production)."
+        echo "[wrapper] Timeout exit #${CONSECUTIVE_QUICK_EXITS} — another instance likely holds the Telegram session."
         if [ "$CONSECUTIVE_QUICK_EXITS" -ge 3 ]; then
-            echo "[wrapper] Production instance appears to be running. Backing off 5 minutes..."
+            echo "[wrapper] Production instance running. Backing off 5 minutes to let it stabilise..."
             CONSECUTIVE_QUICK_EXITS=0
             sleep 300
-            echo "[wrapper] Retrying after backoff..."
+            echo "[wrapper] Back from backoff — retrying..."
             continue
         fi
     else
