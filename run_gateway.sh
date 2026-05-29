@@ -2,10 +2,42 @@
 export HERMES_HOME="$HOME/.hermes"
 export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
-# PORTKEY_API_KEY and TELEGRAM_BOT_TOKEN come from Replit secrets automatically
 
-HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
 PORT="${PORT:-8080}"
+
+# Find hermes binary dynamically — path differs between dev and production
+find_hermes() {
+    # 1. Check PATH first (works if pip installed to a PATH-accessible location)
+    local h
+    h=$(which hermes 2>/dev/null)
+    if [ -n "$h" ] && [ -f "$h" ]; then echo "$h"; return; fi
+
+    # 2. Common pip install --break-system-packages locations
+    for candidate in \
+        "/usr/local/bin/hermes" \
+        "/usr/bin/hermes" \
+        "$HOME/.local/bin/hermes" \
+        "/home/runner/workspace/.pythonlibs/bin/hermes" \
+        "/home/runner/.pythonlibs/bin/hermes" \
+        "/nix/store/*/bin/hermes"; do
+        if [ -f "$candidate" ]; then echo "$candidate"; return; fi
+    done
+
+    # 3. Ask Python where its scripts go
+    local pybase
+    pybase=$(python3 -m site --user-base 2>/dev/null)
+    if [ -f "${pybase}/bin/hermes" ]; then echo "${pybase}/bin/hermes"; return; fi
+
+    echo ""
+}
+
+HERMES_BIN=$(find_hermes)
+if [ -z "$HERMES_BIN" ]; then
+    echo "[wrapper] ERROR: hermes binary not found! Check pip install step."
+    exit 1
+fi
+echo "[wrapper] Using hermes at: $HERMES_BIN"
+"$HERMES_BIN" --version
 
 # Write ~/.hermes/.env so Hermes picks up allowed users and gateway settings
 mkdir -p "$HERMES_HOME"
@@ -17,6 +49,7 @@ PORTKEY_CONFIG=${PORTKEY_CONFIG:-pc-gemini-85dd0b}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 DOTENV
 echo "[wrapper] Wrote ~/.hermes/.env"
+echo "[wrapper] TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}"
 
 # Start minimal HTTP health check server in background
 python3 -c "
@@ -33,7 +66,7 @@ print('[health] HTTP health check server listening on port', port, flush=True)
 http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 " &
 
-# Reset Telegram polling state — clears any stale getUpdates sessions from previous instances
+# Reset Telegram polling state — clears stale getUpdates sessions from old instances
 echo "[wrapper] Resetting Telegram polling state..."
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" && echo ""
 sleep 2
@@ -48,12 +81,11 @@ sleep 3
 echo "[wrapper] Starting Hermes Gateway loop..."
 
 while true; do
-    "$HERMES_BIN" gateway run
+    "$HERMES_BIN" gateway run 2>&1
     EXIT_CODE=$?
     echo "[wrapper] Gateway exited (code=$EXIT_CODE). Cleaning up before restart..."
     pkill -f "hermes gateway" 2>/dev/null || true
     "$HERMES_BIN" gateway stop 2>/dev/null || true
-    # Reset Telegram state before each restart to prevent polling conflicts
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     sleep 10
     echo "[wrapper] Restarting gateway..."
