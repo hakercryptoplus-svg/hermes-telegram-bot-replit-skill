@@ -1,3 +1,10 @@
+providers:
+  portkey:
+    name: "Portkey"
+    api: "http://127.0.0.1:8765"
+    key_env: "PORTKEY_API_KEY"
+    transport: "openai_chat"
+
 model:
   provider: portkey
   name: gemini-3.5-flash
