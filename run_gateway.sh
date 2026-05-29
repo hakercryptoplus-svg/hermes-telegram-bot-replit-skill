@@ -4,7 +4,11 @@ export PORTKEY_CONFIG="pc-gemini-85dd0b"
 export HERMES_NO_UPDATE_CHECK="1"
 # PORTKEY_API_KEY and TELEGRAM_BOT_TOKEN come from Replit secrets automatically
 
-HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
+# Find hermes binary — works in both dev and production
+export PATH="$HOME/.local/bin:$HOME/workspace/.pythonlibs/bin:$PATH"
+HERMES_BIN=$(command -v hermes 2>/dev/null || echo "$HOME/.local/bin/hermes")
+
+echo "[wrapper] Using hermes at: $HERMES_BIN"
 
 # Kill any stale gateway and clean lock
 "$HERMES_BIN" gateway stop 2>/dev/null || true
