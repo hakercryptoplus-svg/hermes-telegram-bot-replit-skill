@@ -73,7 +73,7 @@ except OSError:
     sys.exit(0)
 " &
 
-# ── INITIAL CLEANUP ────────────────────────────────────────────────────────────
+# ── ONE-TIME STARTUP CLEANUP (runs once only, not on every restart) ────────────
 echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 3
@@ -92,7 +92,14 @@ sleep 30
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
+# Tracks quick exits to detect when another instance (production) is already running.
+# If hermes exits within 30s three times in a row → back off 5 minutes instead of
+# constantly stealing and breaking production's Telegram polling session.
+CONSECUTIVE_QUICK_EXITS=0
+
 while true; do
+    START_TIME=$(date +%s)
+
     # Run hermes in background so our trap can catch SIGTERM
     "$HERMES_BIN" gateway run &
     HERMES_PID=$!
@@ -101,13 +108,30 @@ while true; do
     # Wait for hermes to exit (returns when hermes exits OR when trap fires)
     wait $HERMES_PID
     EXIT_CODE=$?
-
-    # If trap fired (SIGTERM/INT), we already exited — this line won't be reached
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Restarting in 15s..."
     HERMES_PID=""
 
-    "$HERMES_BIN" gateway stop 2>/dev/null || true
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+    END_TIME=$(date +%s)
+    UPTIME=$((END_TIME - START_TIME))
+
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)."
+
+    if [ $EXIT_CODE -ne 0 ] && [ "$UPTIME" -lt 30 ]; then
+        CONSECUTIVE_QUICK_EXITS=$((CONSECUTIVE_QUICK_EXITS + 1))
+        echo "[wrapper] Quick exit #${CONSECUTIVE_QUICK_EXITS} (likely polling conflict with production)."
+        if [ "$CONSECUTIVE_QUICK_EXITS" -ge 3 ]; then
+            echo "[wrapper] Production instance appears to be running. Backing off 5 minutes..."
+            CONSECUTIVE_QUICK_EXITS=0
+            sleep 300
+            echo "[wrapper] Retrying after backoff..."
+            continue
+        fi
+    else
+        CONSECUTIVE_QUICK_EXITS=0
+    fi
+
+    # Normal restart — no deleteWebhook/gateway stop here to avoid breaking
+    # any other running instance (production) that holds the Telegram session.
+    echo "[wrapper] Restarting in 15s..."
     sleep 15
     echo "[wrapper] Restarting gateway..."
 done
