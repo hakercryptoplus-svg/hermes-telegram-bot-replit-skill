@@ -1,24 +1,53 @@
 #!/bin/bash
 export HERMES_HOME="$HOME/.hermes"
-export PORTKEY_CONFIG="pc-gemini-85dd0b"
 export HERMES_NO_UPDATE_CHECK="1"
+export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
 # PORTKEY_API_KEY and TELEGRAM_BOT_TOKEN come from Replit secrets automatically
 
-# Find hermes binary — works in both dev and production
-export PATH="$HOME/.local/bin:$HOME/workspace/.pythonlibs/bin:$PATH"
-HERMES_BIN=$(command -v hermes 2>/dev/null || echo "$HOME/.local/bin/hermes")
+HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
+PORT="${PORT:-8080}"
 
-echo "[wrapper] Using hermes at: $HERMES_BIN"
+# Write ~/.hermes/.env so Hermes picks up allowed users and gateway settings
+mkdir -p "$HERMES_HOME"
+cat > "$HERMES_HOME/.env" <<EOF
+TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
+TELEGRAM_ADMIN_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
+PORTKEY_API_KEY=${PORTKEY_API_KEY}
+PORTKEY_CONFIG=${PORTKEY_CONFIG:-pc-gemini-85dd0b}
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+EOF
+echo "[wrapper] Wrote ~/.hermes/.env"
 
-# Kill any stale gateway and clean lock
+# Start minimal HTTP health check server in background
+python3 -c "
+import http.server, os
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Hermes Gateway Running\n')
+    def log_message(self, *a): pass
+port = int(os.environ.get('PORT', 8080))
+print('[health] HTTP health check server listening on port', port, flush=True)
+http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
+" &
+
+# Kill ALL stale hermes processes aggressively before starting
+echo "[wrapper] Clearing stale hermes processes..."
+pkill -f "hermes gateway" 2>/dev/null || true
+sleep 2
 "$HERMES_BIN" gateway stop 2>/dev/null || true
-sleep 1
+sleep 3
 
 echo "[wrapper] Starting Hermes Gateway loop..."
 
 while true; do
     "$HERMES_BIN" gateway run
     EXIT_CODE=$?
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Restarting in 3s..."
-    sleep 3
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE). Cleaning up before restart..."
+    pkill -f "hermes gateway" 2>/dev/null || true
+    "$HERMES_BIN" gateway stop 2>/dev/null || true
+    sleep 10
+    echo "[wrapper] Restarting gateway..."
 done
