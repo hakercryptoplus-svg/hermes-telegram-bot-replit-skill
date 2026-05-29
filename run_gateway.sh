@@ -1,4 +1,6 @@
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 export HERMES_HOME="$HOME/.hermes"
 export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
@@ -7,39 +9,34 @@ PORT="${PORT:-8080}"
 
 # Find hermes binary dynamically — path differs between dev and production
 find_hermes() {
-    # 1. Check PATH first (works if pip installed to a PATH-accessible location)
     local h
     h=$(which hermes 2>/dev/null)
     if [ -n "$h" ] && [ -f "$h" ]; then echo "$h"; return; fi
 
-    # 2. Common pip install --break-system-packages locations
     for candidate in \
         "/usr/local/bin/hermes" \
         "/usr/bin/hermes" \
         "$HOME/.local/bin/hermes" \
         "/home/runner/workspace/.pythonlibs/bin/hermes" \
-        "/home/runner/.pythonlibs/bin/hermes" \
-        "/nix/store/*/bin/hermes"; do
+        "/home/runner/.pythonlibs/bin/hermes"; do
         if [ -f "$candidate" ]; then echo "$candidate"; return; fi
     done
 
-    # 3. Ask Python where its scripts go
     local pybase
     pybase=$(python3 -m site --user-base 2>/dev/null)
     if [ -f "${pybase}/bin/hermes" ]; then echo "${pybase}/bin/hermes"; return; fi
-
     echo ""
 }
 
 HERMES_BIN=$(find_hermes)
 if [ -z "$HERMES_BIN" ]; then
-    echo "[wrapper] ERROR: hermes binary not found! Check pip install step."
+    echo "[wrapper] ERROR: hermes binary not found!"
     exit 1
 fi
 echo "[wrapper] Using hermes at: $HERMES_BIN"
 "$HERMES_BIN" --version
 
-# Write ~/.hermes/.env so Hermes picks up allowed users and gateway settings
+# Write ~/.hermes/.env so Hermes picks up allowed users and keys
 mkdir -p "$HERMES_HOME"
 cat > "$HERMES_HOME/.env" <<DOTENV
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
@@ -51,7 +48,7 @@ DOTENV
 echo "[wrapper] Wrote ~/.hermes/.env"
 echo "[wrapper] TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}"
 
-# Start minimal HTTP health check server in background
+# Start HTTP health check server (Replit deploy probe needs HTTP 200)
 python3 -c "
 import http.server, os
 class H(http.server.BaseHTTPRequestHandler):
@@ -66,12 +63,20 @@ print('[health] HTTP health check server listening on port', port, flush=True)
 http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
 " &
 
-# Reset Telegram polling state — clears stale getUpdates sessions from old instances
+# Start Portkey proxy — adds x-portkey-api-key + x-portkey-config headers
+# Hermes cannot add custom headers; this proxy bridges the gap
+echo "[wrapper] Starting Portkey proxy..."
+python3 "$SCRIPT_DIR/portkey_proxy.py" &
+PROXY_PID=$!
+sleep 2
+echo "[wrapper] Portkey proxy started (pid=$PROXY_PID)"
+
+# Reset Telegram polling state — clears stale getUpdates sessions
 echo "[wrapper] Resetting Telegram polling state..."
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" && echo ""
 sleep 2
 
-# Kill ALL stale hermes processes aggressively
+# Kill stale hermes processes
 echo "[wrapper] Clearing stale hermes processes..."
 pkill -f "hermes gateway" 2>/dev/null || true
 sleep 2
