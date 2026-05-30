@@ -9,10 +9,14 @@ telegram:
   admin_from:
     - 7281928709
 
+agent:
+  api_max_retries: 1
+  gateway_notify_interval: 60
+
 gateway:
   session_reset:
     mode: idle
-    idle_minutes: 60
+    idle_minutes: 10080
 
 stt:
   enabled: true
