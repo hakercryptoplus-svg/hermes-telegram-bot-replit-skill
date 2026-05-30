@@ -46,7 +46,7 @@ export default function App() {
           Bot Online · Connected to Telegram
         </div>
         <p style={{ marginTop: "2rem", color: "#475569", fontSize: "0.8rem" }}>
-          Message @Agent_x_claw_bot on Telegram to start a conversation
+          Message your bot on Telegram to start a conversation
         </p>
       </div>
       <style>{`
