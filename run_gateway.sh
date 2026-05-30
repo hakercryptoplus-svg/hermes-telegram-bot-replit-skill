@@ -80,11 +80,6 @@ cat > "$HOME/.openclaw/openclaw.json" <<CONFIG
       }
     }
   },
-  "memory": {
-    "search": {
-      "enabled": false
-    }
-  },
   "channels": {
     "telegram": {
       "botToken": "${TELEGRAM_BOT_TOKEN}",
