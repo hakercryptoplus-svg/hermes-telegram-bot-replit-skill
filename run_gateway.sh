@@ -1,105 +1,112 @@
 #!/bin/bash
-export HERMES_HOME="$HOME/.hermes"
-export HERMES_NO_UPDATE_CHECK="1"
+export OPENCLAW_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
+export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-${SESSION_SECRET}}"
 
 # ── SIGNAL HANDLING ────────────────────────────────────────────────────────────
-HERMES_PID=""
+OPENCLAW_PID=""
 cleanup_and_exit() {
     echo "[wrapper] SIGTERM received — shutting down cleanly..."
-    [ -n "$HERMES_PID" ] && kill "$HERMES_PID" 2>/dev/null
-    wait "$HERMES_PID" 2>/dev/null
+    [ -n "$OPENCLAW_PID" ] && kill "$OPENCLAW_PID" 2>/dev/null
+    wait "$OPENCLAW_PID" 2>/dev/null
     exit 0
 }
 trap cleanup_and_exit SIGTERM SIGHUP INT
 
-# ── FIND HERMES BINARY ─────────────────────────────────────────────────────────
-if command -v hermes &>/dev/null; then
-    HERMES_BIN="$(command -v hermes)"
-elif [ -f "/home/runner/workspace/.pythonlibs/bin/hermes" ]; then
-    HERMES_BIN="/home/runner/workspace/.pythonlibs/bin/hermes"
-elif [ -f "$HOME/.local/bin/hermes" ]; then
-    HERMES_BIN="$HOME/.local/bin/hermes"
+# ── FIND / INSTALL OPENCLAW BINARY ─────────────────────────────────────────────
+if command -v openclaw &>/dev/null; then
+    OPENCLAW_BIN="$(command -v openclaw)"
 else
-    HERMES_BIN="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/hermes"
+    echo "[wrapper] openclaw not found — installing via npm..."
+    npm install -g openclaw 2>&1
+    OPENCLAW_BIN="$(command -v openclaw)"
 fi
-echo "[wrapper] Using hermes binary: $HERMES_BIN"
-"$HERMES_BIN" --version 2>&1 || { echo "[wrapper] ERROR: hermes not found"; exit 1; }
+echo "[wrapper] Using openclaw binary: $OPENCLAW_BIN"
+"$OPENCLAW_BIN" --version 2>&1 || { echo "[wrapper] ERROR: openclaw not found after install"; exit 1; }
 
 PORT="${PORT:-8080}"
 
-# ── WRITE .env ─────────────────────────────────────────────────────────────────
-mkdir -p "$HERMES_HOME"
-cat > "$HERMES_HOME/.env" <<DOTENV
-TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
-TELEGRAM_ADMIN_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
-TELEGRAM_HOME_CHANNEL=${TELEGRAM_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-7281928709}}
-PORTKEY_API_KEY=${PORTKEY_API_KEY}
-PORTKEY_CONFIG=${PORTKEY_CONFIG:-pc-gemini-85dd0b}
-TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-DOTENV
-echo "[wrapper] Wrote ~/.hermes/.env"
-echo "[wrapper] TELEGRAM_BOT_TOKEN set: $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo YES || echo NO)"
-echo "[wrapper] PORTKEY_API_KEY set: $([ -n "$PORTKEY_API_KEY" ] && echo YES || echo NO)"
-
-# ── PRE-FLIGHT: verify bot token with Telegram API ────────────────────────────
-if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-    GETME=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe")
-    echo "[wrapper] getMe response: $GETME"
-else
+# ── PRE-FLIGHT: verify bot token ───────────────────────────────────────────────
+if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
     echo "[wrapper] ERROR: TELEGRAM_BOT_TOKEN is empty — bot cannot start"
     exit 1
 fi
+GETME=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe")
+echo "[wrapper] getMe response: $GETME"
 
-# ── INSTALL PORTKEY PLUGIN ─────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-mkdir -p "$HERMES_HOME/plugins/model-providers/portkey"
-cp "$SCRIPT_DIR/portkey_plugin/__init__.py" "$HERMES_HOME/plugins/model-providers/portkey/__init__.py"
-cp "$SCRIPT_DIR/portkey_plugin/plugin.yaml" "$HERMES_HOME/plugins/model-providers/portkey/plugin.yaml"
+echo "[wrapper] TELEGRAM_BOT_TOKEN set: YES"
+echo "[wrapper] PORTKEY_API_KEY set: $([ -n "$PORTKEY_API_KEY" ] && echo YES || echo NO)"
 
-# Write config dynamically so TELEGRAM_CHAT_ID env var is used (not hardcoded ID)
+# ── WRITE ~/.openclaw/.env ─────────────────────────────────────────────────────
+mkdir -p "$HOME/.openclaw"
+cat > "$HOME/.openclaw/.env" <<DOTENV
+OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+PORTKEY_API_KEY=${PORTKEY_API_KEY}
+PORTKEY_CONFIG=${PORTKEY_CONFIG}
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+DOTENV
+echo "[wrapper] Wrote ~/.openclaw/.env"
+
+# ── WRITE ~/.openclaw/openclaw.json ────────────────────────────────────────────
 TGID="${TELEGRAM_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-7281928709}}"
-cat > "$HERMES_HOME/config.yaml" <<CONFIG
-model:
-  provider: portkey
-  name: gemini-3.5-flash
-
-telegram:
-  free_response_chats: true
-  allow_from:
-    - ${TGID}
-  admin_from:
-    - ${TGID}
-
-agent:
-  # Fail fast on rate-limit errors instead of retrying 3x (avoids 6-min waits).
-  # If you hit 429s often, add a Google AI API key to your Portkey config at
-  # https://app.portkey.ai — free key = 1500 req/day vs 20/day without.
-  api_max_retries: 1
-  # Send a "still working" ping every 60s so user sees progress on long tasks.
-  gateway_notify_interval: 60
-
-gateway:
-  session_reset:
-    # Keep session alive for 7 days of inactivity so the bot remembers context.
-    # Change to idle_minutes: 60 if you prefer fresh sessions after 1 hour.
-    mode: idle
-    idle_minutes: 10080
-
-stt:
-  enabled: true
-
-display:
-  tool_progress: all
-  platforms:
-    telegram:
-      tool_progress: all
-
-terminal:
-  cwd: /home/runner/workspace
-  timeout: 30
+cat > "$HOME/.openclaw/openclaw.json" <<CONFIG
+{
+  "models": {
+    "providers": {
+      "litellm": {
+        "baseUrl": "https://api.portkey.ai/v1",
+        "apiKey": "${PORTKEY_API_KEY}",
+        "api": "openai-completions",
+        "headers": {
+          "x-portkey-config": "${PORTKEY_CONFIG}"
+        },
+        "models": [
+          {
+            "id": "gemini-3.5-flash",
+            "name": "Gemini 3.5 Flash",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 1000000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "litellm/gemini-3.5-flash"
+      }
+    }
+  },
+  "memory": {
+    "search": {
+      "enabled": false
+    }
+  },
+  "channels": {
+    "telegram": {
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["${TGID}"],
+      "streaming": {
+        "mode": "partial",
+        "preview": {
+          "toolProgress": true
+        }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    }
+  }
+}
 CONFIG
-echo "[wrapper] Installed plugin + wrote config (telegram_id=${TGID})"
+echo "[wrapper] Wrote ~/.openclaw/openclaw.json (telegram_id=${TGID})"
 
 # ── HEALTH CHECK SERVER ────────────────────────────────────────────────────────
 python3 -c "
@@ -115,7 +122,7 @@ try:
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b'Hermes Gateway Running\n')
+            self.wfile.write(b'OpenClaw Gateway Running\n')
         def log_message(self, *a): pass
     print('[health] Listening on port', port, flush=True)
     http.server.HTTPServer(('0.0.0.0', port), H).serve_forever()
@@ -124,19 +131,15 @@ except OSError:
     sys.exit(0)
 " &
 
-# ── ONE-TIME STARTUP CLEANUP ────────────────────────────────────────────────────
-echo "[wrapper] Killing any stale hermes processes..."
-pkill -9 -f "hermes gateway" 2>/dev/null || true
+# ── ONE-TIME STARTUP CLEANUP ───────────────────────────────────────────────────
+echo "[wrapper] Killing any stale openclaw processes..."
+pkill -9 -f "openclaw gateway" 2>/dev/null || true
 sleep 2
 
-# deleteWebhook once to drop any pending updates
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
 echo "[wrapper] deleteWebhook done"
 
-# ⚠️ DO NOT call getUpdates here — it opens a competing long-poll that causes
-# Telegram "polling conflict" errors in hermes for up to 10 minutes.
-# Instead, wait 35s so Telegram's server closes any old long-poll session
-# naturally (Telegram max long-poll timeout is 30s).
+# Wait for old Telegram long-poll session to expire (Telegram max poll timeout = 30s)
 echo "[wrapper] Waiting 35s for any existing Telegram session to expire..."
 sleep 35
 echo "[wrapper] Starting gateway..."
@@ -144,25 +147,22 @@ echo "[wrapper] Starting gateway..."
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
 while true; do
     START_TIME=$(date +%s)
-    echo "[wrapper] Starting hermes gateway..."
+    echo "[wrapper] Starting openclaw gateway..."
 
-    PYTHONUNBUFFERED=1 "$HERMES_BIN" gateway run &
-    HERMES_PID=$!
-    echo "[wrapper] Gateway PID: $HERMES_PID"
+    "$OPENCLAW_BIN" gateway &
+    OPENCLAW_PID=$!
+    echo "[wrapper] Gateway PID: $OPENCLAW_PID"
 
-    wait $HERMES_PID
+    wait $OPENCLAW_PID
     EXIT_CODE=$?
-    HERMES_PID=""
+    OPENCLAW_PID=""
 
     END_TIME=$(date +%s)
     UPTIME=$((END_TIME - START_TIME))
     echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)"
 
-    # Kill any orphaned hermes processes
-    pkill -9 -f "hermes gateway" 2>/dev/null || true
+    pkill -9 -f "openclaw gateway" 2>/dev/null || true
 
-    # ⚠️ DO NOT call getUpdates in the restart loop — creates competing long-polls.
-    # Wait 35s for Telegram's session to expire naturally before restarting.
     echo "[wrapper] Waiting 35s for Telegram session to expire before restart..."
     sleep 35
 done
