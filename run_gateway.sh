@@ -120,11 +120,6 @@ sleep 10
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
-# hermes v0.14.0 internal wedge: Updater gets stuck but doesn't exit.
-# Timeout 3600s lets hermes run a full session (avoids false kills during AI retries).
-# Session steal at STARTUP ONLY — running it every restart interrupts valid connections.
-# PYTHONUNBUFFERED=1 ensures Python flushes output immediately to deployment logs.
-
 while true; do
     START_TIME=$(date +%s)
     echo "[wrapper] Starting hermes gateway..."
