@@ -52,7 +52,7 @@ export HERMES_HOME="$HOME/.hermes"
 export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
 
-# ── 1. SIGTERM TRAP (prevents zombie restart cascade on workflow restart) ───────
+# ── 1. SIGTERM TRAP ──────────────────────────────────────────────────────────────
 HERMES_PID=""
 cleanup_and_exit() {
     [ -n "$HERMES_PID" ] && kill "$HERMES_PID" 2>/dev/null
@@ -61,35 +61,35 @@ cleanup_and_exit() {
 }
 trap cleanup_and_exit SIGTERM SIGHUP INT
 
-# ... find hermes binary, write .env, install plugin, start health server ...
+# ... find hermes binary, write .env, install plugin, write config, start health server ...
 
-# ── 2. ONE-TIME STARTUP CLEANUP (NOT repeated in restart loop) ──────────────────
+# ── 2. ONE-TIME STARTUP CLEANUP ──────────────────────────────────────────────────
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 2
-# 3x deleteWebhook + getUpdates steal + sleep 10 to clear Telegram session
-for i in 1 2 3; do
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-    sleep 3
-done
-sleep 10
 
-# ── 3. RESTART LOOP with session clear on each restart ───────────────────────────
+# deleteWebhook once to drop pending updates
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+
+# ⚠️ DO NOT call getUpdates here — it opens a competing long-poll that causes
+# Telegram "polling conflict" errors in hermes for up to 10 minutes.
+# Wait 35s so Telegram closes any old long-poll session naturally (max timeout = 30s).
+echo "[wrapper] Waiting 35s for any existing Telegram session to expire..."
+sleep 35
+
+# ── 3. RESTART LOOP ───────────────────────────────────────────────────────────────
 while true; do
     START_TIME=$(date +%s)
-    PYTHONUNBUFFERED=1 timeout 3600 "$HERMES_BIN" gateway run &
+    PYTHONUNBUFFERED=1 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     wait $HERMES_PID
     EXIT_CODE=$?
     HERMES_PID=""
-    UPTIME=$(( $(date +%s) - START_TIME ))
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)."
-    # Clear session before each restart (safe in loop — unlike deleteWebhook)
+
     pkill -9 -f "hermes gateway" 2>/dev/null || true
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-    sleep 3
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-    sleep 5
+
+    # ⚠️ DO NOT call getUpdates in the restart loop — creates competing long-polls.
+    # Wait 35s for Telegram's session to expire naturally before restarting.
+    sleep 35
 done
 ```
 
@@ -114,6 +114,12 @@ gateway:
 
 stt:
   enabled: true
+
+display:
+  tool_progress: all       # sends progress messages to Telegram during tool calls
+  platforms:
+    telegram:
+      tool_progress: all
 ```
 
 > **Do NOT add a `providers:` block** — causes `telegram connect timed out`.
@@ -163,23 +169,24 @@ args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifac
 
 Simple status page — **no heavy dependencies, inline styles only**. Do NOT use Radix/shadcn components or import from `@workspace/api-client-react` — it causes build failures. Use the `bot_status_App.tsx` file from this repo directly.
 
-## All Gotchas (13 total)
+## All Gotchas (14 total)
 
 | # | Symptom | Fix |
 |---|---------|-----|
 | 1 | `pip install --user` fails in prod | Use `--break-system-packages` |
 | 2 | App starts but Replit health check fails | Health server on `$PORT` must start BEFORE gateway |
-| 3 | `Conflict: terminated by other getUpdates` on fresh start | deleteWebhook ×3 + 10s wait at ONE-TIME startup |
+| 3 | `Conflict: terminated by other getUpdates` on fresh start | `deleteWebhook` once + `sleep 35` — let Telegram expire sessions naturally (max 30s). **Never call `getUpdates` in startup or restart loop.** |
 | 4 | "Unauthorized" even with correct ID | `TELEGRAM_ALLOWED_USERS` must be **numeric** (not `@username`) |
 | 5 | `telegram connect timed out` | Remove `providers:` block from `hermes_config.yaml` |
 | 6 | `No such file or directory` | Use absolute path in artifact.toml dev run command |
 | 7 | SIGTERM loop — hermes exits code=143 on every restart | `trap cleanup_and_exit SIGTERM` + hermes in background with `&` |
 | 8 | `Address already in use` on health server | `SO_REUSEADDR` + `try/except OSError: sys.exit(0)` |
-| 9 | Bot shows "typing" but never responds | `deleteWebhook` in restart loop breaks production session — keep it ONLY in one-time startup |
-| 10 | Dev/prod fight — typing never resolves | `timeout 3600` — hermes NEVER self-exits on polling conflict. **Do NOT use timeout 60** — Telegram long-poll is 30s so hermes always exits at ~60s even when healthy. |
+| 9 | Bot shows "typing" but never responds (10+ min delay) | **Root cause**: `getUpdates?timeout=1` in restart loop competes with hermes long-poll → Telegram conflict → 20s × N retries. Fix: remove ALL `getUpdates` calls from startup and restart loop, use `sleep 35` instead. |
+| 10 | Bot responds but user never sees "computing..." updates | Add `display.tool_progress: all` and `display.platforms.telegram.tool_progress: all` to `hermes_config.yaml` |
 | 11 | `TELEGRAM_ALLOWED_USERS` username rejected silently | Always set numeric Telegram user ID |
 | 12 | Reserved VM required | Autoscale puts bot to sleep; long-polling needs 24/7 uptime |
-| 13 | **Publish fails silently** — production build errors | `hermes_config.yaml` MUST exist at `artifacts/api-server/hermes_config.yaml`. The build step does `cp artifacts/api-server/hermes_config.yaml $HOME/.hermes/config.yaml` — if the file is missing the build fails. Copy it from this repo's root `hermes_config.yaml`. |
+| 13 | **Publish fails silently** — production build errors | `hermes_config.yaml` MUST exist at `artifacts/api-server/hermes_config.yaml`. The build step does `cp artifacts/api-server/hermes_config.yaml $HOME/.hermes/config.yaml` — if the file is missing the build fails. |
+| 14 | `timeout 3600` in restart loop causes hourly drops | Removed — hermes runs indefinitely. The SIGTERM trap handles clean shutdown. |
 
 ## Rate Limiting
 
