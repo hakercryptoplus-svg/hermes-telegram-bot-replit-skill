@@ -6,9 +6,13 @@ export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
 # ── SIGNAL HANDLING ────────────────────────────────────────────────────────────
 # When Replit workflow sends SIGTERM, exit cleanly (don't loop forever)
 HERMES_PID=""
+WATCHDOG_PID=""
+TAIL_PID=""
 cleanup_and_exit() {
     echo "[wrapper] SIGTERM received — shutting down cleanly..."
-    [ -n "$HERMES_PID" ] && kill "$HERMES_PID" 2>/dev/null
+    [ -n "$HERMES_PID" ]   && kill "$HERMES_PID"   2>/dev/null
+    [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
+    [ -n "$TAIL_PID" ]     && kill "$TAIL_PID"     2>/dev/null
     wait "$HERMES_PID" 2>/dev/null
     exit 0
 }
@@ -123,14 +127,17 @@ sleep 30
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
-CONSECUTIVE_QUICK_EXITS=0
+# hermes v0.14.0 has an internal bug: when the Updater gets "wedged" it calls
+# start_polling() on an already-running Updater → self-conflict → bot delays 3-6 min.
+# Fix: watchdog monitors hermes output and kills it immediately on wedge signals,
+# then the loop restarts with a fresh session steal for a clean reconnect.
+HERMES_LOG="/tmp/hermes_run.log"
 
 while true; do
     START_TIME=$(date +%s)
 
     # Force-steal the Telegram polling session before each start.
-    # This terminates any lingering getUpdates connection (old deployment, zombie process)
-    # so hermes always starts into a clean slot.
+    # Terminates any lingering getUpdates connection (zombie process, old deployment).
     echo "[wrapper] Stealing Telegram session slot..."
     for _i in 1 2 3; do
         curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
@@ -139,44 +146,46 @@ while true; do
     pkill -9 -f "hermes gateway" 2>/dev/null || true
     sleep 2
 
-    # Run hermes with a 3600s (1h) timeout so it doesn't loop forever on conflict.
-    # (hermes v0.14.0 retries polling conflict internally and never self-exits)
-    # NOTE: never use timeout <120s — Telegram long-poll is 30s per cycle so hermes
-    # exits at ~60s even when healthy, making it look like a conflict (code=124).
-    timeout 3600 "$HERMES_BIN" gateway run &
+    # Fresh log file each run
+    > "$HERMES_LOG"
+
+    # Run hermes — output goes to log file (watchdog reads it)
+    # Hard timeout 600s (10 min) as ultimate safety net.
+    # NOTE: never use timeout <120s — Telegram long-poll=30s so hermes exits at
+    # ~60s even when healthy, code=124 looks like conflict but isn't.
+    timeout 600 "$HERMES_BIN" gateway run > "$HERMES_LOG" 2>&1 &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
-    # Wait for hermes to exit (returns when hermes exits OR when trap fires)
+    # Tail log to stdout so deployment logs stay visible
+    tail -f "$HERMES_LOG" &
+    TAIL_PID=$!
+
+    # Watchdog: kill hermes immediately on internal wedge signals
+    # (hermes v0.14.0 bug: retries wedged Updater instead of exiting)
+    _HPID=$HERMES_PID
+    (
+        sleep 45
+        while kill -0 "$_HPID" 2>/dev/null; do
+            sleep 15
+            if grep -qE "Updater not running|polling retry failed|Updater is already running" "$HERMES_LOG" 2>/dev/null; then
+                echo "[watchdog] Wedge detected — killing hermes $_HPID for clean restart"
+                kill -9 "$_HPID" 2>/dev/null
+                break
+            fi
+        done
+    ) &
+    WATCHDOG_PID=$!
+
     wait $HERMES_PID
     EXIT_CODE=$?
     HERMES_PID=""
 
+    kill "$WATCHDOG_PID" 2>/dev/null; wait "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
+    kill "$TAIL_PID"     2>/dev/null; wait "$TAIL_PID"     2>/dev/null; TAIL_PID=""
+
     END_TIME=$(date +%s)
     UPTIME=$((END_TIME - START_TIME))
-
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)."
-
-    # Conflict detection: code=124 (timeout) AND uptime < 120s means hermes
-    # never connected — another instance holds the Telegram polling session.
-    # (normal operation: hermes runs 600s per cycle, so uptime will be ~600s)
-    if [ $EXIT_CODE -eq 124 ] && [ "$UPTIME" -lt 120 ]; then
-        CONSECUTIVE_QUICK_EXITS=$((CONSECUTIVE_QUICK_EXITS + 1))
-        echo "[wrapper] Quick timeout exit #${CONSECUTIVE_QUICK_EXITS} (uptime=${UPTIME}s) — another instance likely holds the Telegram session."
-        if [ "$CONSECUTIVE_QUICK_EXITS" -ge 3 ]; then
-            echo "[wrapper] Production instance running. Backing off 5 minutes to let it stabilise..."
-            CONSECUTIVE_QUICK_EXITS=0
-            sleep 300
-            echo "[wrapper] Back from backoff — retrying..."
-            continue
-        fi
-    else
-        CONSECUTIVE_QUICK_EXITS=0
-    fi
-
-    # Normal restart — no deleteWebhook/gateway stop here to avoid breaking
-    # any other running instance (production) that holds the Telegram session.
-    echo "[wrapper] Restarting in 15s..."
-    sleep 15
-    echo "[wrapper] Restarting gateway..."
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s) — restarting in 10s..."
+    sleep 10
 done
