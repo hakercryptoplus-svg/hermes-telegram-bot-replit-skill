@@ -71,10 +71,20 @@ telegram:
   admin_from:
     - ${TGID}
 
+agent:
+  # Fail fast on rate-limit errors instead of retrying 3x (avoids 6-min waits).
+  # If you hit 429s often, add a Google AI API key to your Portkey config at
+  # https://app.portkey.ai — free key = 1500 req/day vs 20/day without.
+  api_max_retries: 1
+  # Send a "still working" ping every 60s so user sees progress on long tasks.
+  gateway_notify_interval: 60
+
 gateway:
   session_reset:
+    # Keep session alive for 7 days of inactivity so the bot remembers context.
+    # Change to idle_minutes: 60 if you prefer fresh sessions after 1 hour.
     mode: idle
-    idle_minutes: 60
+    idle_minutes: 10080
 
 stt:
   enabled: true
@@ -115,7 +125,6 @@ except OSError:
 " &
 
 # ── ONE-TIME STARTUP CLEANUP ────────────────────────────────────────────────────
-# Kill any stale hermes processes first
 echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 2
