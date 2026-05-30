@@ -123,13 +123,21 @@ sleep 30
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
-# Tracks quick exits to detect when another instance (production) is already running.
-# If hermes exits within 30s three times in a row → back off 5 minutes instead of
-# constantly stealing and breaking production's Telegram polling session.
 CONSECUTIVE_QUICK_EXITS=0
 
 while true; do
     START_TIME=$(date +%s)
+
+    # Force-steal the Telegram polling session before each start.
+    # This terminates any lingering getUpdates connection (old deployment, zombie process)
+    # so hermes always starts into a clean slot.
+    echo "[wrapper] Stealing Telegram session slot..."
+    for _i in 1 2 3; do
+        curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
+        sleep 2
+    done
+    pkill -9 -f "hermes gateway" 2>/dev/null || true
+    sleep 2
 
     # Run hermes with a 3600s (1h) timeout so it doesn't loop forever on conflict.
     # (hermes v0.14.0 retries polling conflict internally and never self-exits)
