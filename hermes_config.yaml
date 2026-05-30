@@ -13,3 +13,6 @@ gateway:
   session_reset:
     mode: idle
     idle_minutes: 60
+
+stt:
+  enabled: true
