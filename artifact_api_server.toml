@@ -1,6 +1,6 @@
 kind = "api"
 previewPath = "/api"
-title = "Hermes Telegram Bot"
+title = "OpenClaw Telegram Bot"
 version = "1.0.0"
 id = "3B4_FFSkEVBkAeYMFRJ2e"
 
@@ -15,7 +15,7 @@ run = "bash /home/runner/workspace/artifacts/api-server/run_gateway.sh"
 [services.production]
 
 [services.production.build]
-args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifacts/api-server/requirements.txt && mkdir -p $HOME/.hermes/plugins/model-providers/portkey && cp artifacts/api-server/portkey_plugin/__init__.py $HOME/.hermes/plugins/model-providers/portkey/__init__.py && cp artifacts/api-server/portkey_plugin/plugin.yaml $HOME/.hermes/plugins/model-providers/portkey/plugin.yaml && cp artifacts/api-server/hermes_config.yaml $HOME/.hermes/config.yaml"]
+args = ["bash", "-c", "npm install -g openclaw"]
 
 [services.production.run]
 args = ["bash", "artifacts/api-server/run_gateway.sh"]
