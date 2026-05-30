@@ -4,7 +4,6 @@ export HERMES_NO_UPDATE_CHECK="1"
 export PORTKEY_CONFIG="${PORTKEY_CONFIG:-pc-gemini-85dd0b}"
 
 # ── SIGNAL HANDLING ────────────────────────────────────────────────────────────
-# When Replit workflow sends SIGTERM, exit cleanly (don't loop forever)
 HERMES_PID=""
 cleanup_and_exit() {
     echo "[wrapper] SIGTERM received — shutting down cleanly..."
@@ -78,6 +77,12 @@ gateway:
 
 stt:
   enabled: true
+
+display:
+  tool_progress: all
+  platforms:
+    telegram:
+      tool_progress: all
 CONFIG
 echo "[wrapper] Installed plugin + wrote config (telegram_id=${TGID})"
 
@@ -105,18 +110,21 @@ except OSError:
 " &
 
 # ── ONE-TIME STARTUP CLEANUP ────────────────────────────────────────────────────
+# Kill any stale hermes processes first
 echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
 sleep 2
 
-echo "[wrapper] Clearing Telegram polling session (deleteWebhook + getUpdates steal)..."
-for i in 1 2 3; do
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-    echo "[wrapper] Session clear $i done"
-    sleep 3
-done
-sleep 10
+# deleteWebhook once to drop any pending updates
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
+echo "[wrapper] deleteWebhook done"
+
+# ⚠️ DO NOT call getUpdates here — it opens a competing long-poll that causes
+# Telegram "polling conflict" errors in hermes for up to 10 minutes.
+# Instead, wait 35s so Telegram's server closes any old long-poll session
+# naturally (Telegram max long-poll timeout is 30s).
+echo "[wrapper] Waiting 35s for any existing Telegram session to expire..."
+sleep 35
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
@@ -124,7 +132,7 @@ while true; do
     START_TIME=$(date +%s)
     echo "[wrapper] Starting hermes gateway..."
 
-    PYTHONUNBUFFERED=1 timeout 3600 "$HERMES_BIN" gateway run &
+    PYTHONUNBUFFERED=1 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
@@ -136,12 +144,11 @@ while true; do
     UPTIME=$((END_TIME - START_TIME))
     echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)"
 
-    echo "[wrapper] Clearing session before restart..."
+    # Kill any orphaned hermes processes
     pkill -9 -f "hermes gateway" 2>/dev/null || true
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-    sleep 3
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
 
-    echo "[wrapper] Restarting in 5s..."
-    sleep 5
+    # ⚠️ DO NOT call getUpdates in the restart loop — creates competing long-polls.
+    # Wait 35s for Telegram's session to expire naturally before restarting.
+    echo "[wrapper] Waiting 35s for Telegram session to expire before restart..."
+    sleep 35
 done
