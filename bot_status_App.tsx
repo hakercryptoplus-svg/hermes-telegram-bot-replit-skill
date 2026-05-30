@@ -10,7 +10,7 @@ export default function App() {
       color: "#e2e8f0"
     }}>
       <div style={{ textAlign: "center", padding: "2rem" }}>
-        <div style={{ fontSize: "4rem", marginBottom: "1rem" }}>⚕️</div>
+        <div style={{ fontSize: "4rem", marginBottom: "1rem" }}>🦞</div>
         <h1 style={{
           fontSize: "2rem",
           fontWeight: 700,
@@ -19,10 +19,10 @@ export default function App() {
           WebkitBackgroundClip: "text",
           WebkitTextFillColor: "transparent"
         }}>
-          Hermes Agent Bot
+          OpenClaw Bot
         </h1>
         <p style={{ color: "#94a3b8", marginBottom: "2rem", fontSize: "1rem" }}>
-          Nous Research v0.15.2 · Powered by Gemini via Portkey
+          OpenClaw v2026.5.28 · Powered by Gemini via Portkey
         </p>
         <div style={{
           display: "inline-flex",
