@@ -33,6 +33,7 @@ mkdir -p "$HERMES_HOME"
 cat > "$HERMES_HOME/.env" <<DOTENV
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
 TELEGRAM_ADMIN_USERS=${TELEGRAM_ALLOWED_USERS:-${TELEGRAM_CHAT_ID:-7281928709}}
+TELEGRAM_HOME_CHANNEL=${TELEGRAM_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-7281928709}}
 PORTKEY_API_KEY=${PORTKEY_API_KEY}
 PORTKEY_CONFIG=${PORTKEY_CONFIG:-pc-gemini-85dd0b}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -83,6 +84,10 @@ display:
   platforms:
     telegram:
       tool_progress: all
+
+terminal:
+  cwd: /home/runner/workspace
+  timeout: 30
 CONFIG
 echo "[wrapper] Installed plugin + wrote config (telegram_id=${TGID})"
 
