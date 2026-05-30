@@ -107,10 +107,19 @@ telegram:
   admin_from:
     - 7281928709
 
+agent:
+  # Fail fast on rate-limit errors instead of retrying 3x (avoids 6-min waits).
+  # If you hit 429s often, add a Google AI API key to your Portkey config at
+  # https://app.portkey.ai — free key = 1500 req/day vs 20/day without.
+  api_max_retries: 1
+  # Send a "still working" ping every 60s so user sees progress on long tasks.
+  gateway_notify_interval: 60
+
 gateway:
   session_reset:
+    # Keep session alive for 7 days of inactivity so the bot remembers context.
     mode: idle
-    idle_minutes: 60
+    idle_minutes: 10080
 
 stt:
   enabled: true
@@ -169,7 +178,7 @@ args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifac
 
 Simple status page — **no heavy dependencies, inline styles only**. Do NOT use Radix/shadcn components or import from `@workspace/api-client-react` — it causes build failures. Use the `bot_status_App.tsx` file from this repo directly.
 
-## All Gotchas (14 total)
+## All Gotchas (16 total)
 
 | # | Symptom | Fix |
 |---|---------|-----|
@@ -187,6 +196,8 @@ Simple status page — **no heavy dependencies, inline styles only**. Do NOT use
 | 12 | Reserved VM required | Autoscale puts bot to sleep; long-polling needs 24/7 uptime |
 | 13 | **Publish fails silently** — production build errors | `hermes_config.yaml` MUST exist at `artifacts/api-server/hermes_config.yaml`. The build step does `cp artifacts/api-server/hermes_config.yaml $HOME/.hermes/config.yaml` — if the file is missing the build fails. |
 | 14 | `timeout 3600` in restart loop causes hourly drops | Removed — hermes runs indefinitely. The SIGTERM trap handles clean shutdown. |
+| 15 | **Bot takes 6+ minutes to respond** ("⏳ Working — 6 min") | Gemini free tier = 20 req/day. Default `api_max_retries: 3` causes 3× retry backoff = multi-minute waits. Fix: set `agent.api_max_retries: 1` in config. **Real fix**: add a free Google AI API key at https://aistudio.google.com/apikey to your Portkey config → 1500 req/day. |
+| 16 | **Bot forgets everything after 1 hour** | Default `gateway.session_reset.idle_minutes: 60` resets context after 1h idle. Fix: set `idle_minutes: 10080` (7 days) so memory persists across long gaps. |
 
 ## Rate Limiting
 
