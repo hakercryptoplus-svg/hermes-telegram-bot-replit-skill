@@ -10,12 +10,12 @@ name = "API Server"
 paths = ["/api"]
 
 [services.development]
-run = "pnpm --filter @workspace/api-server run dev"
+run = "python3 -c \"import http.server,os,socket; p=int(os.environ.get(\\\"PORT\\\",8080)); H=type(\\\"H\\\",(http.server.BaseHTTPRequestHandler,),{\\\"do_GET\\\":lambda self:(self.send_response(200),self.send_header(\\\"Content-Type\\\",\\\"text/plain\\\"),self.end_headers(),self.wfile.write(b\\\"Bot running in production only\\\\n\\\")),\\\"log_message\\\":lambda *a:None}); http.server.HTTPServer((\\\"0.0.0.0\\\",p),H).serve_forever()\""
 
 [services.production]
 
 [services.production.build]
-args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifacts/api-server/requirements.txt && mkdir -p $HOME/.hermes/plugins/model-providers/portkey && cp artifacts/api-server/portkey_plugin/__init__.py $HOME/.hermes/plugins/model-providers/portkey/__init__.py && cp artifacts/api-server/portkey_plugin/plugin.yaml $HOME/.hermes/plugins/model-providers/portkey/plugin.yaml && cp artifacts/api-server/hermes_config.yaml $HOME/.hermes/config.yaml"]
+args = ["bash", "-c", "python3 -m pip install --break-system-packages -r artifacts/api-server/requirements.txt && mkdir -p \$HOME/.hermes/plugins/model-providers/portkey && cp artifacts/api-server/portkey_plugin/__init__.py \$HOME/.hermes/plugins/model-providers/portkey/__init__.py && cp artifacts/api-server/portkey_plugin/plugin.yaml \$HOME/.hermes/plugins/model-providers/portkey/plugin.yaml && cp artifacts/api-server/hermes_config.yaml \$HOME/.hermes/config.yaml"]
 
 [services.production.run]
 args = ["bash", "artifacts/api-server/run_gateway.sh"]
