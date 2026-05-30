@@ -22,3 +22,7 @@ display:
   platforms:
     telegram:
       tool_progress: all
+
+terminal:
+  cwd: /home/runner/workspace
+  timeout: 30
