@@ -104,45 +104,32 @@ except OSError:
     sys.exit(0)
 " &
 
-# ── ONE-TIME STARTUP CLEANUP (runs once only, not on every restart) ────────────
+# ── ONE-TIME STARTUP CLEANUP ────────────────────────────────────────────────────
 echo "[wrapper] Killing any stale hermes processes..."
 pkill -9 -f "hermes gateway" 2>/dev/null || true
-sleep 3
-"$HERMES_BIN" gateway stop 2>/dev/null || true
+sleep 2
 
-echo "[wrapper] Resetting Telegram polling state..."
+echo "[wrapper] Clearing Telegram polling session (deleteWebhook + getUpdates steal)..."
 for i in 1 2 3; do
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    echo "[wrapper] Reset $i done"
-    sleep 5
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
+    echo "[wrapper] Session clear $i done"
+    sleep 3
 done
-
-echo "[wrapper] Waiting 30s for Telegram session to clear..."
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-sleep 30
+sleep 10
 echo "[wrapper] Starting gateway..."
 
 # ── RESTART LOOP ───────────────────────────────────────────────────────────────
-# hermes v0.14.0 has an internal "wedge" bug — its Updater can lock up.
-# Fix: short 150s timeout forces a clean kill+restart every ~2.5 min max.
-# Session steal before each start ensures no external conflict.
-# 150s > 120s threshold so normal healthy exits are not mistaken for conflicts.
+# hermes v0.14.0 internal wedge: Updater gets stuck but doesn't exit.
+# Timeout 3600s lets hermes run a full session (avoids false kills during AI retries).
+# Session steal at STARTUP ONLY — running it every restart interrupts valid connections.
+# PYTHONUNBUFFERED=1 ensures Python flushes output immediately to deployment logs.
 
 while true; do
     START_TIME=$(date +%s)
+    echo "[wrapper] Starting hermes gateway..."
 
-    # Steal the Telegram polling session — terminates any lingering connection.
-    echo "[wrapper] Stealing Telegram session slot..."
-    for _i in 1 2 3; do
-        curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
-        sleep 2
-    done
-    pkill -9 -f "hermes gateway" 2>/dev/null || true
-    sleep 2
-
-    # Run hermes directly to stdout so deployment logs stay visible.
-    # 150s hard timeout: if hermes wedges, it's killed and restarted within 2.5 min.
-    PYTHONUNBUFFERED=1 timeout 150 "$HERMES_BIN" gateway run &
+    PYTHONUNBUFFERED=1 timeout 3600 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
@@ -152,6 +139,14 @@ while true; do
 
     END_TIME=$(date +%s)
     UPTIME=$((END_TIME - START_TIME))
-    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s) — restarting in 5s..."
+    echo "[wrapper] Gateway exited (code=$EXIT_CODE, uptime=${UPTIME}s)"
+
+    echo "[wrapper] Clearing session before restart..."
+    pkill -9 -f "hermes gateway" 2>/dev/null || true
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
+    sleep 3
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=1&offset=-1" > /dev/null 2>&1
+
+    echo "[wrapper] Restarting in 5s..."
     sleep 5
 done
