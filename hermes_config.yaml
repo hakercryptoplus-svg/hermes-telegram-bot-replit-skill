@@ -16,3 +16,9 @@ gateway:
 
 stt:
   enabled: true
+
+display:
+  tool_progress: all
+  platforms:
+    telegram:
+      tool_progress: all
