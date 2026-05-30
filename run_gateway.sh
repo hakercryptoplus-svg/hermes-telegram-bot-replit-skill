@@ -75,6 +75,9 @@ gateway:
   session_reset:
     mode: idle
     idle_minutes: 60
+
+stt:
+  enabled: true
 CONFIG
 echo "[wrapper] Installed plugin + wrote config (telegram_id=${TGID})"
 
@@ -128,11 +131,11 @@ CONSECUTIVE_QUICK_EXITS=0
 while true; do
     START_TIME=$(date +%s)
 
-    # Run hermes with a 600s timeout so it doesn't loop forever on polling conflict.
+    # Run hermes with a 3600s (1h) timeout so it doesn't loop forever on conflict.
     # (hermes v0.14.0 retries polling conflict internally and never self-exits)
-    # NOTE: 60s was too short — Telegram long-poll is 30s per cycle, so 60s killed
-    # hermes after exactly 1 cycle making it look like a conflict (code=124).
-    timeout 600 "$HERMES_BIN" gateway run &
+    # NOTE: never use timeout <120s — Telegram long-poll is 30s per cycle so hermes
+    # exits at ~60s even when healthy, making it look like a conflict (code=124).
+    timeout 3600 "$HERMES_BIN" gateway run &
     HERMES_PID=$!
     echo "[wrapper] Gateway PID: $HERMES_PID"
 
