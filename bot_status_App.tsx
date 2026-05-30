@@ -22,7 +22,7 @@ export default function App() {
           Hermes Agent Bot
         </h1>
         <p style={{ color: "#94a3b8", marginBottom: "2rem", fontSize: "1rem" }}>
-          Nous Research v0.14.0 · Powered by Gemini via Portkey
+          Nous Research v0.15.2 · Powered by Gemini via Portkey
         </p>
         <div style={{
           display: "inline-flex",
@@ -46,7 +46,7 @@ export default function App() {
           Bot Online · Connected to Telegram
         </div>
         <p style={{ marginTop: "2rem", color: "#475569", fontSize: "0.8rem" }}>
-          Message @HermesAgent on Telegram to start a conversation
+          Message @Agent_x_claw_bot on Telegram to start a conversation
         </p>
       </div>
       <style>{`
